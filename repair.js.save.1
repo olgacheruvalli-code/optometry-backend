@@ -1,0 +1,138 @@
+cd ~/optometry-backend
+cat > repair.js <<'EOF'
+// repair.js — quick backend checker for your Optometry API
+// Usage:
+//   node repair.js
+//   node repair.js --district "Kozhikode" --institution "District Hospital Vadakara" --month April --year 2025
+//   API_BASE=http://localhost:5000 node repair.js --seed
+
+const API_BASE = process.env.API_BASE || 'http://127.0.0.1:5000';
+
+const defaults = {
+  district: "Kozhikode",
+  institution: "District Hospital Vadakara",
+  month: "April",
+  year: "2025",
+  seed: false,
+};
+
+// parse args
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === "--district") defaults.district = args[++i];
+  else if (a === "--institution") defaults.institution = args[++i];
+  else if (a === "--month") defaults.month = args[++i];
+  else if (a === "--year") defaults.year = String(args[++i]);
+  else if (a === "--seed") defaults.seed = true;
+}
+
+function qs(obj) {
+  return Object.entries(obj)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join("&");
+}
+
+async function parseJsonSafe(res) {
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+async function get(path) {
+  const url = `${API_BASE}${path}`;
+  const res = await fetch(url);
+  const data = await parseJsonSafe(res);
+  return { url, status: res.status, ok: res.ok, data };
+}
+
+async function post(path, body) {
+  const url = `${API_BASE}${path}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {})
+  });
+  const data = await parseJsonSafe(res);
+  return { url, status: res.status, ok: res.ok, data };
+}
+
+function log(title, obj) {
+  console.log(`\n=== ${title} ===`);
+  console.log(obj);
+}
+
+(async () => {
+  console.log("🔧 repair.js starting…");
+  console.log("API_BASE:", API_BASE);
+  console.log("Params:", defaults);
+
+  // 1) Health
+  let r = await get("/api/health");
+  log("GET /api/health", r);
+
+  // 2) Optional route (ok if 404)
+  try {
+    r = await get("/api/debug/who");
+    log("GET /api/debug/who", r);
+  } catch {
+    console.log("ℹ️ /api/debug/who not present (that’s fine).");
+  }
+
+  // 3) List reports (light)
+  const listQ = `/api/reports?${qs({
+    month: defaults.month,
+    year: defaults.year,
+    district: defaults.district,
+    institution: defaults.institution
+  })}`;
+  r = await get(listQ);
+  log(`GET ${listQ}`, { status: r.status, ok: r.ok, count: Array.isArray(r.data) ? r.data.length : 0, sample: Array.isArray(r.data) ? r.data[0] : r.data });
+  const list = Array.isArray(r.data) ? r.data : [];
+  const id = list[0]?._id;
+
+  // 4) List reports (full)
+  const listFullQ = `${listQ}&full=1`;
+  r = await get(listFullQ);
+  log(`GET ${listFullQ}`, { status: r.status, ok: r.ok, count: Array.isArray(r.data) ? r.data.length : 0, sample: Array.isArray(r.data) ? r.data[0] : r.data });
+
+  // 5) Detail by keys
+  r = await get(`/api/report?${qs({
+    district: defaults.district,
+    institution: defaults.institution,
+    month: defaults.month,
+    year: defaults.year
+  })}`);
+  log("GET /api/report?{keys}", r);
+  if (r.status === 404 && typeof r.data === 'string' && String(r.data).includes("Cannot GET /api/report")) {
+    console.warn("⚠️ Your server.js does not include the /api/report route.");
+  }
+
+  // 6) Detail by id
+  if (id) {
+    const byIdPath = `/api/reports/${id}`;
+    const r2 = await get(byIdPath);
+    log(`GET ${byIdPath}`, r2);
+  } else {
+    console.log("ℹ️ No _id from list; skipping /api/reports/:id test.");
+  }
+
+  // 7) Optional seed
+  if (defaults.seed) {
+    const body = {
+      district: defaults.district,
+      institution: defaults.institution,
+      month: defaults.month,
+      year: defaults.year,
+      answers: { q1: 1 }
+    };
+    const s = await post("/api/reports", body);
+    log("POST /api/reports (seed)", s);
+  }
+
+  console.log("\n✅ repair.js finished.");
+})().catch((e) => {
+  console.error("\n💥 repair.js crashed:", e);
+  process.exit(1);
+});
+EOF
+

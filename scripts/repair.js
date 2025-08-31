@@ -1,0 +1,21 @@
+const mongoose = require('mongoose');
+const Report = require('../models/Report'); // Adjust path if needed
+
+const MONGO_URI = "mongodb://127.0.0.1:27017/optometry";
+
+async function repairReports() {
+  await mongoose.connect(MONGO_URI, { dbName: "optometry" });
+  const reports = await Report.find({});
+  for (const r of reports) {
+    let changed = false;
+    if (!r.answers) { r.answers = {}; changed = true; }
+    if (!r.cumulative) { r.cumulative = {}; changed = true; }
+    if (!r.eyeBank) { r.eyeBank = []; changed = true; }
+    if (!r.visionCenter) { r.visionCenter = []; changed = true; }
+    if (changed) await r.save();
+  }
+  console.log("Repair complete.");
+  mongoose.disconnect();
+}
+
+repairReports();
