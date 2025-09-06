@@ -1,563 +1,396 @@
-// server.js — Optometry backend API (Express 5 + Mongoose)
-// ----------------------------------------------------------------------
-
-const express  = require("express");
-const cors     = require("cors");
+// server.js
+const express = require("express");
+const cors = require("cors");
 const mongoose = require("mongoose");
-const Report   = require("./models/Report");
 
-// ——— config ———
-const PORT          = process.env.PORT || 5000;
-const MONGO_URI     = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/optometry";
-const DEBUG_API     = /^1|true$/i.test(String(process.env.DEBUG_API || ""));
-const USE_MEMORY_DB = /^1|true$/i.test(String(process.env.USE_MEMORY_DB || ""));
+/* ======================= Config ======================= */
+const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/optometry";
 
-// ——— app init ———
+const ORIGINS_RAW = process.env.ALLOWED_ORIGINS || process.env.CORS_ORIGIN || "";
+const ALLOWED_ORIGINS = ORIGINS_RAW.split(",").map(s => s.trim()).filter(Boolean);
+
+const FISCAL_MONTHS = [
+  "April","May","June","July","August","September",
+  "October","November","December","January","February","March",
+];
+const ALL_QUESTION_KEYS = Array.from({ length: 84 }, (_, i) => `q${i + 1}`);
+
+/* ======================= Helpers ======================= */
+const _num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const _empty84 = () => Array.from({ length: 84 }, () => 0);
+const _answersTo84Array = (ans = {}) => ALL_QUESTION_KEYS.map((k) => _num(ans[k]));
+const _sum84 = (a = [], b = []) => {
+  const n = Math.max(a.length, b.length);
+  const out = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) out[i] = _num(a[i]) + _num(b[i]);
+  return out;
+};
+const _normalize84 = (obj = {}) => {
+  const out = {};
+  for (const k of ALL_QUESTION_KEYS) out[k] = _num(obj[k]);
+  return out;
+};
+const _ensure84OnDoc = (doc) => {
+  if (!doc) return doc;
+  const d = { ...(doc.toObject?.() || doc) };
+  d.answers = _normalize84(d.answers || {});
+  const hasCum = d.cumulative && Object.keys(d.cumulative).length > 0;
+  d.cumulative = hasCum ? _normalize84(d.cumulative) : { ...d.answers };
+  return d;
+};
+const _fiscalStartYear = (m, y) => (["January","February","March"].includes(m) ? (+y - 1) : (+y));
+function _fiscalWindow(toMonth, toYear) {
+  const startY = _fiscalStartYear(toMonth, toYear);
+  const window = [];
+  for (let i = 0; i < FISCAL_MONTHS.length; i++) {
+    const m = FISCAL_MONTHS[i];
+    const y = i <= 8 ? startY : startY + 1; // Apr–Dec startY, Jan–Mar next year
+    window.push({ month: m, year: String(y) });
+    if (m === toMonth && String(y) === String(toYear)) break;
+  }
+  return window;
+}
+const escRe = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const ciEq = (field, value) => ({
+  [field]: { $regex: `^${escRe(String(value).trim())}$`, $options: "i" },
+});
+function normalizeMonth(m = "") {
+  const s = String(m).trim();
+  if (!s) return s;
+  const full = FISCAL_MONTHS.find((n) => n.toLowerCase() === s.toLowerCase());
+  if (full) return full;
+  const map = {
+    jan: "January", feb: "February", mar: "March", apr: "April", may: "May",
+    jun: "June", jul: "July", aug: "August", sep: "September", sept: "September",
+    oct: "October", nov: "November", dec: "December",
+  };
+  const key = s.slice(0, 4).toLowerCase();
+  return map[key] || s;
+}
+
+/* ======================= Mongoose ======================= */
+const ReportSchema = new mongoose.Schema(
+  {
+    district: { type: String, required: true },
+    institution: { type: String, required: true },
+    month: { type: String, required: true, enum: FISCAL_MONTHS },
+    year: { type: String, required: true },
+    answers: { type: Object, default: {} },
+    cumulative: { type: Object, default: {} },
+    eyeBank: { type: Array, default: [] },
+    visionCenter: { type: Array, default: [] },
+  },
+  { versionKey: false, timestamps: true }
+);
+ReportSchema.index({ district: 1, institution: 1, month: 1, year: 1 }, { unique: true });
+const Report = mongoose.model("Report", ReportSchema);
+
+/* ======================= Express App ======================= */
 const app = express();
-app.use(cors());
-app.use(express.json());
 
-// Tag each response so you know which build handled it
-const STARTED_AT = new Date().toISOString();
+// CORS (preflight handled)
+const corsOptions = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // non-browser tools
+    if (ALLOWED_ORIGINS.length === 0) return cb(null, true); // allow any if not set
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(null, false);
+  },
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false, // set true only if you use cookies
+  maxAge: 86400,
+  optionsSuccessStatus: 204,
+};
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use((req, res, next) => {
-  res.set("X-Server-Tag", `server.js@${new Date().toISOString()}`);
-  res.set("X-Server-File", __filename);
-  res.set("X-Server-Started-At", STARTED_AT);
+  res.header("Vary", "Origin");
   next();
 });
 
-// ——— helpers ———
-const KEY_COUNT  = 84;
-const KEYS       = Array.from({ length: KEY_COUNT }, (_, i) => `q${i + 1}`);
-const FY_MONTHS  = ["April","May","June","July","August","September","October","November","December","January","February","March"];
-const MONTH_INDEX = Object.fromEntries(FY_MONTHS.map((m,i)=>[m,i]));
-const ORDER = MONTH_INDEX;
+// Robust body parsing (must be before guards)
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-const clean = (s) => String(s || "").trim().replace(/\s+/g, " ");
-const esc   = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+let dbReady = false;
+const startedAt = new Date().toISOString();
 
-// Accepts full month name, prefix, or 1..12 (FY starting April)
-function monthRegexLoose(m){
-  if(!m) return undefined;
-  const full  = clean(m), lower = full.toLowerCase();
-  const idx   = FY_MONTHS.findIndex(x => x.toLowerCase() === lower || x.toLowerCase().startsWith(lower));
-  if (!Number.isNaN(Number(lower)) && Number(lower)>=1 && Number(lower)<=12){
-    const i = (Number(lower)+2)%12; // 1→April, 12→March
-    const fullName = FY_MONTHS[i];
-    return new RegExp(`^${esc(fullName.slice(0,3))}(?:${esc(fullName.slice(3))})?$`,"i");
+// Allow diagnostics + login while DB not ready
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  const pass = ["/api/health", "/api/version", "/api/login", "/api/debug/echo", "/api/debug/body"];
+  if (!dbReady && req.path.startsWith("/api") && !pass.includes(req.path)) {
+    return res.status(503).json({ ok: false, error: "db_not_ready" });
   }
-  if (idx>=0){
-    const fullName=FY_MONTHS[idx];
-    return new RegExp(`^${esc(fullName.slice(0,3))}(?:${esc(fullName.slice(3))})?$`,"i");
-  }
-  return new RegExp(esc(full),"i");
-}
+  next();
+});
 
-// Robust number parser
-function numberFromAny(v) {
-  if (v === null || v === undefined) return 0;
-  const s = String(v).trim();
-  if (!s || /^(-|—|NA|N\/A|nil)$/i.test(s)) return 0;
-  const n = Number(s.replace(/,/g, ""));
-  return Number.isFinite(n) ? n : 0;
-}
+/* ======================= Diagnostics ======================= */
+app.get("/api/health", (req, res) =>
+  res.json({ ok: true, startedAt, tag: "server.js", version: "login-v4" })
+);
+app.get("/api/version", (req, res) => res.json({ ok: true, version: "login-v4" }));
+app.post("/api/debug/echo", (req, res) => res.json({ ok: true, body: req.body || null }));
+app.post("/api/debug/body", (req, res) => {
+  const body = req.body;
+  res.json({
+    ok: true,
+    type: typeof body,
+    keys: body && typeof body === "object" ? Object.keys(body) : null,
+    raw: body,
+  });
+});
 
-// Normalize incoming "answers" from various shapes
-function answersFromAny(input) {
-  const out = {}; for (let i = 1; i <= KEY_COUNT; i++) out[`q${i}`] = 0;
-
-  if (Array.isArray(input)) {
-    for (let i = 0; i < Math.min(KEY_COUNT, input.length); i++) {
-      out[`q${i+1}`] = numberFromAny(input[i]);
+/* ======================= LOGIN (tolerant) ======================= */
+app.post("/api/login", (req, res) => {
+  try {
+    let body = req.body || {};
+    if (typeof body === "string") {
+      try { body = JSON.parse(body); } catch {}
     }
-    return out;
-  }
 
-  if (input && typeof input === "object") {
-    for (const [k, v] of Object.entries(input)) {
-      const m = String(k).match(/(\d{1,2})$/);
-      if (!m) continue;
-      const n = Number(m[1]);
-      if (n >= 1 && n <= KEY_COUNT) out[`q${n}`] = numberFromAny(v);
+    console.log("[/api/login] headers:", req.headers);
+    console.log("[/api/login] body:", body);
+
+    let { username, district, institution, password } = body;
+    district = String(district || "").trim();
+    institution = String(institution || "").trim();
+    password = String(password || "").trim();
+    username = String(username || "").trim() || institution;
+
+    if (!district || !institution || !password) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_fields",
+        got: { district: !!district, institution: !!institution, passwordLen: password.length },
+      });
     }
-  }
-  return out;
-}
 
-function cloneAnswers84(src){
-  const out={};
-  for (let i=1;i<=KEY_COUNT;i++){
-    const k=`q${i}`;
-    out[k]=numberFromAny(src?.[k] ?? 0);
-  }
-  return out;
-}
-function to84Numbers(raw){
-  const arr=new Array(KEY_COUNT).fill(0);
-  if (raw && typeof raw==="object" && !Array.isArray(raw)){
-    for(let i=0;i<KEY_COUNT;i++) arr[i]=numberFromAny(raw[KEYS[i]] ?? 0);
-  } else if (Array.isArray(raw)){
-    for(let i=0;i<Math.min(KEY_COUNT, raw.length);i++) arr[i]=numberFromAny(raw[i] ?? 0);
-  }
-  return arr;
-}
-function plus84(a,b){ const out=new Array(KEY_COUNT); for(let i=0;i<KEY_COUNT;i++) out[i]=Number(a[i]||0)+Number(b[i]||0); return out; }
-function object84FromArrayNumbers(arr){ const out={}; for(let i=0;i<KEY_COUNT;i++) out[KEYS[i]]=Number(arr[i]||0); return out; }
-
-function getFYStartYear(targetYear, targetMonth){
-  return ["January","February","March"].includes(targetMonth) ? (Number(targetYear)-1) : Number(targetYear);
-}
-function isMonthOnOrBefore(aMonth,aYear,bMonth,bYear){
-  const aIdx=MONTH_INDEX[aMonth], bIdx=MONTH_INDEX[bMonth];
-  const aFY=getFYStartYear(aYear,aMonth); const bFY=getFYStartYear(bYear,bMonth);
-  if (aFY!==bFY) return aFY<bFY; return aIdx<=bIdx;
-}
-
-// ——— Mongo connect (local first, fallback to in-memory; or force with USE_MEMORY_DB=1) ———
-let MEMORY_ACTIVE = false;
-let __memUri = null;
-
-(async () => {
-  async function connect(uri) {
-    await mongoose.connect(uri, { dbName: "optometry" });
-    console.log("✅ Mongo connected:", uri);
-  }
-
-  try {
-    if (USE_MEMORY_DB) throw new Error("FORCE_MEMORY_DB");
-    await connect(MONGO_URI);
-  } catch (e) {
-    console.error("❌ Mongo connect error:", e.message);
-    try {
-      // Use a stable memory server binary version
-      const { MongoMemoryServer } = require("mongodb-memory-server");
-      const mem = await MongoMemoryServer.create({ binary: { version: "6.0.6" } });
-      __memUri = mem.getUri("optometry");
-      await connect(__memUri);
-      MEMORY_ACTIVE = true;
-      console.log("🧪 Using mongodb-memory-server @ 6.0.6");
-      app.get("/api/debug/memdb", (_req, res) => res.json({ memory: true, uri: __memUri }));
-    } catch (e2) {
-      console.error("❌ Failed to start memory server:", e2.message);
-    }
-  }
-})();
-
-// ——— debug/health routes ———
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, tag: "server.js", pid: process.pid, time: new Date().toISOString(), file: __filename, startedAt: STARTED_AT });
-});
-
-app.get("/api/debug/who", (req, res) => {
-  const routes = (app._router?.stack || [])
-    .filter(l => l.route && l.route.path)
-    .map(l => ({ path: l.route.path, methods: Object.keys(l.route.methods || {}) }));
-  res.json({ ok: true, pid: process.pid, file: __filename, startedAt: STARTED_AT, routes });
-});
-
-// Quick inventory of what exists
-app.get("/api/debug/groups", async (_req, res) => {
-  try {
-    const rows = await Report.aggregate([
-      { $group: { _id: { district:"$district", institution:"$institution", year:"$year", month:"$month" }, c:{$sum:1} } },
-      { $sort: { "_id.district":1, "_id.institution":1, "_id.year":1, "_id.month":1 } }
-    ]);
-    const groups = rows.map(r => ({
-      district: r._id.district,
-      institution: r._id.institution,
-      year: r._id.year,
-      month: r._id.month,
-      count: r.c
-    }));
-    const totalDocs = await Report.countDocuments({});
-    res.json({ totalDocs, groups });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:e.message });
-  }
-});
-
-// Per institution timeline
-app.get("/api/debug/timeline", async (req, res) => {
-  try {
-    const q = {};
-    if (req.query.district) q.district = new RegExp(`^${esc(clean(req.query.district))}$`,"i");
-    const docs = await Report.find(q).select("district institution month year").lean();
-    const map = new Map();
-    for (const d of docs) {
-      const k = `${d.district}||${d.institution}`;
-      if (!map.has(k)) map.set(k, { district: d.district, institution: d.institution, months: [] });
-      map.get(k).months.push({ year: d.year, month: d.month });
-    }
-    res.json({ totalInstitutions: map.size, timelines: Array.from(map.values()) });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:e.message });
-  }
-});
-
-// Flexible finder (case-insensitive contains)
-app.get("/api/debug/find-like", async (req, res) => {
-  try {
-    const { district, institution, month, year } = req.query || {};
-    const q = {};
-    if (district)    q.district    = new RegExp(esc(clean(district)), "i");
-    if (institution) q.institution = new RegExp(esc(clean(institution)), "i");
-    if (month)       q.month       = new RegExp(esc(clean(month)), "i");
-    if (year)        q.year        = String(year);
-    const docs = await Report.find(q).select("district institution month year updatedAt").lean();
-    res.json(docs.sort((a,b)=> (a.institution||"").localeCompare(b.institution||"")));
-  } catch (e) {
-    console.error("GET /api/debug/find-like error:", e?.message||e);
-    res.status(500).json({ ok:false, error:"server_error" });
-  }
-});
-
-// DB info (which DB are we on, counts, sample)
-app.get("/api/debug/db-info", async (_req, res) => {
-  try {
-    const conn = mongoose.connection;
-    const total = await Report.countDocuments({});
-    const byYear = await Report.aggregate([
-      { $group: { _id: { year: "$year" }, c: { $sum: 1 } } },
-      { $sort: { "_id.year": 1 } }
-    ]);
-    const byDistrict = await Report.aggregate([
-      { $group: { _id: { district: "$district" }, c: { $sum: 1 } } },
-      { $sort: { c: -1 } }
-    ]);
-    const sample = await Report.find({})
-      .select("district institution month year updatedAt")
-      .sort({ updatedAt: -1 })
-      .limit(10)
-      .lean();
-
-    res.json({
+    const role = /^dc\s|^doc\s/i.test(institution) ? "DOC" : "USER";
+    return res.json({
       ok: true,
-      envMongoUri: MONGO_URI,
-      usingMemory: MEMORY_ACTIVE,
-      mongoose: {
-        readyState: conn.readyState,
-        name: conn.name,
-        host: conn.host,
-        port: conn.port,
-      },
-      model: {
-        collection: Report.collection?.name,
-        databaseName: Report.db?.name,
-      },
-      totals: { documents: total, byYear, byDistrict },
-      sample
+      user: { username, district, institution, role, isDoc: role === "DOC" },
+      token: "dev-token",
     });
   } catch (e) {
-    res.status(500).json({ ok:false, error: e.message });
-  }
-});
-
-// Mirror payloads for debugging
-app.post("/api/debug/echo", (req, res) => {
-  if (DEBUG_API) console.log("ECHO BODY:", JSON.stringify(req.body, null, 2));
-  res.json({ ok: true, body: req.body });
-});
-
-// Preview normalization & cumulative WITHOUT saving
-app.post("/api/debug/preview", async (req, res) => {
-  try {
-    const district    = clean(req.body?.district);
-    const institution = clean(req.body?.institution);
-    const month       = clean(req.body?.month);
-    const year        = String(req.body?.year || "").trim();
-    if (!district || !institution || !month || !year) {
-      return res.status(400).json({ error: "district, institution, month, year are required" });
-    }
-
-    const merge =
-      String(req.query.merge ?? "").toLowerCase() === "1" ||
-      req.body.merge === true;
-
-    const filter   = { district, institution, month, year };
-    const existing = await Report.findOne(filter).lean();
-
-    const incoming = answersFromAny(req.body.answers || {});
-    let answers = {}; for (let i=1;i<=KEY_COUNT;i++) answers[`q${i}`]=0;
-
-    if (merge && existing?.answers) {
-      answers = cloneAnswers84(existing.answers);
-      Object.assign(answers, incoming);
-    } else {
-      Object.assign(answers, incoming);
-    }
-
-    // compute cumulative preview
-    const fyStartYear  = getFYStartYear(year, month);
-    const priorReports = await Report.find({ district, institution })
-      .select("month year answers").lean();
-    let cum = new Array(KEY_COUNT).fill(0);
-    for (const r of priorReports) {
-      const rMonth = String(r.month || "");
-      const rYear  = String(r.year  || "");
-      if (!rMonth || !rYear) continue;
-      if (rYear === year && rMonth === month) continue;
-      if (getFYStartYear(rYear, rMonth) === fyStartYear &&
-          isMonthOnOrBefore(rMonth, rYear, month, year)) {
-        cum = plus84(cum, to84Numbers(r.answers));
-      }
-    }
-    cum = plus84(cum, to84Numbers(answers));
-    const cumulative = object84FromArrayNumbers(cum);
-
-    res.json({ ok:true, preview:{ answers, cumulative }, existingId: existing?._id || null });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:e.message });
-  }
-});
-
-// ——— Institutions helper (for DOC menu) ———
-app.get("/api/institutions", async (req, res) => {
-  try {
-    const district = clean(req.query?.district);
-    const q = {};
-    if (district) q.district = new RegExp(`^${esc(district)}$`, "i");
-    const list = await Report.distinct("institution", q);
-    const filtered = (list || [])
-      .filter(name => !!name && !/^DC\s|^DOC\s/i.test(name))
-      .sort((a, b) => a.localeCompare(b));
-    res.json(filtered);
-  } catch (e) {
-    console.error("GET /api/institutions error:", e?.message || e);
-    res.status(500).json({ error: "Failed to load institutions" });
-  }
-});
-
-// ——— LIST: reports (light by default; add ?full=1 for heavy fields) ———
-app.get("/api/reports", async (req, res) => {
-  try {
-    const { month, year, district, institution, full } = req.query || {};
-    const q = {};
-    if (month)       q.month       = monthRegexLoose(month);
-    if (year)        q.year        = String(year);
-    if (district)    q.district    = new RegExp(`^${esc(clean(district))}$`, "i");
-    if (institution) q.institution = new RegExp(`^${esc(clean(institution))}$`, "i");
-
-    const wantFull   = String(full).toLowerCase() === "1" || String(full).toLowerCase() === "true";
-    const projection = wantFull
-      ? "+answers +cumulative +eyeBank +visionCenter"
-      : "district institution month year updatedAt";
-
-    const docs = await Report.find(q).select(projection).lean();
-
-    // sort: newest FY first; then month order; then institution name
-    docs.sort((a, b) => {
-      const ya = Number(a.year), yb = Number(b.year);
-      if (ya !== yb) return yb - ya;
-      const ma = ORDER[a.month] ?? 99, mb = ORDER[b.month] ?? 99;
-      if (ma !== mb) return ma - mb;
-      return (a.institution || "").localeCompare(b.institution || "");
-    });
-
-    if (DEBUG_API) console.log("GET /api/reports found:", docs.length, "query:", q);
-    res.json(docs);
-  } catch (e) {
-    console.error("GET /api/reports error:", e);
-    res.status(500).json({ error: "Failed to load reports" });
-  }
-});
-
-// ——— DETAIL by id (supports ObjectId or synthetic key) ———
-app.get("/api/reports/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-    let doc = null;
-
-    if (/^[0-9a-fA-F]{24}$/.test(id)) {
-      doc = await Report.findById(id)
-        .select("+answers +cumulative +eyeBank +visionCenter")
-        .lean();
-    } else {
-      const [district, institution, year, month] = decodeURIComponent(id).split("::");
-      if (district && institution && year && month) {
-        doc = await Report.findOne({
-          district:    new RegExp(`^${esc(clean(district))}$`, "i"),
-          institution: new RegExp(`^${esc(clean(institution))}$`, "i"),
-          month:       monthRegexLoose(month),
-          year:        String(year),
-        }).select("+answers +cumulative +eyeBank +visionCenter").lean();
-      }
-    }
-
-    if (!doc) return res.status(404).json({ ok: false, error: "not_found" });
-    res.json(doc);
-  } catch (e) {
-    console.error("GET /api/reports/:id error:", e?.message || e);
-    res.status(400).json({ ok: false, error: "bad_id" });
-  }
-});
-
-// ——— DETAIL by keys (district/institution/month/year) ———
-app.get("/api/report", async (req, res) => {
-  const { district, institution, month, year } = req.query || {};
-  if (!district || !institution || !month || !year) {
-    return res.status(400).json({ error: "district, institution, month, year are required" });
-  }
-  try {
-    const doc = await Report.findOne({
-      district:    new RegExp(`^${esc(clean(district))}$`, "i"),
-      institution: new RegExp(`^${esc(clean(institution))}$`, "i"),
-      month:       monthRegexLoose(month),
-      year:        String(year),
-    }).select("+answers +cumulative +eyeBank +visionCenter").lean();
-    if (DEBUG_API) console.log("GET /api/report", { district, institution, month, year, found: !!doc });
-    if (!doc) return res.status(404).json({ ok: false, error: "not_found" });
-    res.json(doc);
-  } catch (e) {
-    console.error("GET /api/report error:", e?.message || e);
+    console.error("login error:", e);
     res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-// ——— Save/Upsert report (MERGE-SAFE) ———
-// Use ?merge=1 or body.merge=true to only update provided q* keys.
-// If the client omits `answers` and a doc exists, we MERGE to avoid zeroing existing values.
+/* ======================= Reports ======================= */
+// List (filterable)
+app.get("/api/reports", async (req, res) => {
+  try {
+    const { district, institution, month, year } = req.query;
+    const q = {};
+    if (district) Object.assign(q, ciEq("district", district));
+    if (institution) Object.assign(q, ciEq("institution", institution));
+    if (month) q.month = normalizeMonth(month);
+    if (year) q.year = String(year);
+
+    const docs = await Report.find(q).sort({ year: -1 }).lean();
+    const out = docs
+      .map(_ensure84OnDoc)
+      .sort((a, b) => {
+        const y = (parseInt(b.year) || 0) - (parseInt(a.year) || 0);
+        if (y !== 0) return y;
+        return (FISCAL_MONTHS.indexOf(b.month) ?? -1) - (FISCAL_MONTHS.indexOf(a.month) ?? -1);
+      });
+    res.json(out);
+  } catch (e) {
+    console.error("GET /api/reports error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// Get one
+app.get("/api/report", async (req, res) => {
+  try {
+    const { district, institution, month, year } = req.query;
+    if (!district || !institution || !month || !year) {
+      return res.status(400).json({ ok: false, error: "missing_query" });
+    }
+    const doc = await Report.findOne({
+      ...ciEq("district", district),
+      ...ciEq("institution", institution),
+      month: normalizeMonth(month),
+      year: String(year),
+    });
+    if (!doc) return res.status(404).json({ ok: false, error: "not_found" });
+    res.json(_ensure84OnDoc(doc));
+  } catch (e) {
+    console.error("GET /api/report error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// Create/update (upsert)
 app.post("/api/reports", async (req, res) => {
   try {
-    const district    = clean(req.body?.district);
-    const institution = clean(req.body?.institution);
-    const month       = clean(req.body?.month);
-    const year        = String(req.body?.year || "").trim();
+    let {
+      district,
+      institution,
+      month,
+      year,
+      answers = {},
+      cumulative = {},
+      eyeBank = [],
+      visionCenter = [],
+    } = req.body || {};
+
+    district = String(district || "").trim();
+    institution = String(institution || "").trim();
+    month = normalizeMonth(month || "");
+    year = String(year || "").trim();
+
     if (!district || !institution || !month || !year) {
-      return res.status(400).json({ error: "district, institution, month, year are required" });
+      return res.status(400).json({ ok: false, error: "missing_fields" });
     }
 
-    let merge =
-      String(req.query.merge ?? "").toLowerCase() === "1" ||
-      req.body.merge === true;
-
-    const filter   = { district, institution, month, year };
-    const existing = await Report.findOne(filter).lean();
-
-    // If client omitted answers but an existing doc is present, force merge
-    const hasAnswers = !!(req.body && Object.prototype.hasOwnProperty.call(req.body, "answers")
-      && req.body.answers && Object.keys(req.body.answers).length > 0);
-    if (!hasAnswers && existing) merge = true;
-
-    const incoming = answersFromAny(req.body.answers || {});
-    if (DEBUG_API || String(req.query.debug) === "1") {
-      const keys = Object.entries(incoming).filter(([,v])=>v!==0).map(([k])=>k);
-      console.log("POST /api/reports recognized non-zero:", keys.join(", ") || "(none)");
-    }
-
-    // Build final answers (merge or overwrite)
-    let answers84Obj = {}; for (let i=1;i<=KEY_COUNT;i++) answers84Obj[`q${i}`] = 0;
-
-    if (merge && existing?.answers) {
-      answers84Obj = cloneAnswers84(existing.answers);
-      Object.assign(answers84Obj, incoming);
-    } else {
-      Object.assign(answers84Obj, incoming);
-    }
-
-    // CUMULATIVE: recalc FY up to current month, avoiding double count
-    let cumulative84Obj;
-    if (req.body.cumulative && Object.keys(req.body.cumulative).length) {
-      cumulative84Obj = cloneAnswers84(req.body.cumulative);
-    } else {
-      const fyStartYear = getFYStartYear(year, month);
-      const priorReports = await Report.find({ district, institution })
-        .select("month year answers").lean();
-      let cum = new Array(KEY_COUNT).fill(0);
-      for (const r of priorReports) {
-        const rMonth = String(r.month || "");
-        const rYear  = String(r.year  || "");
-        if (!rMonth || !rYear) continue;
-        if (rYear === year && rMonth === month) continue; // skip current month
-        if (getFYStartYear(rYear, rMonth) === fyStartYear &&
-            isMonthOnOrBefore(rMonth, rYear, month, year)) {
-          cum = plus84(cum, to84Numbers(r.answers));
-        }
-      }
-      cum = plus84(cum, to84Numbers(answers84Obj));
-      cumulative84Obj = object84FromArrayNumbers(cum);
-    }
-
-    const eyeBank      = Array.isArray(req.body.eyeBank) ? req.body.eyeBank : [];
-    const visionCenter = Array.isArray(req.body.visionCenter) ? req.body.visionCenter : [];
+    const normAnswers = _normalize84(answers || {});
+    const normCumulative =
+      cumulative && Object.keys(cumulative).length ? _normalize84(cumulative) : { ...normAnswers };
 
     const update = {
-      district, institution, month, year,
-      answers: answers84Obj,
-      cumulative: cumulative84Obj,
-      eyeBank, visionCenter,
-      updatedAt: new Date()
+      district,
+      institution,
+      month,
+      year,
+      answers: normAnswers,
+      cumulative: normCumulative,
+      eyeBank: Array.isArray(eyeBank) ? eyeBank : [],
+      visionCenter: Array.isArray(visionCenter) ? visionCenter : [],
+      updatedAt: new Date(),
     };
-    const options = { upsert: true, new: true, setDefaultsOnInsert: true };
 
-    const doc = await Report.findOneAndUpdate(filter, update, options);
-    return res.json({ ok: true, doc });
-  } catch (err) {
-    console.error("❌ POST /api/reports failed:", err?.message || err);
-    return res.status(500).json({ error: "Failed to save report" });
+    const doc = await Report.findOneAndUpdate(
+      {
+        district: new RegExp(`^${escRe(district)}$`, "i"),
+        institution: new RegExp(`^${escRe(institution)}$`, "i"),
+        month,
+        year
+      },
+      { $set: update },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({ ok: true, report: _ensure84OnDoc(doc) });
+  } catch (e) {
+    console.error("POST /api/reports error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-// ——— Fast fetch ALL reports (optionally full docs) ———
-app.get("/api/reports/space/all", async (req, res) => {
+// Danger: wipe all (dev/debug only)
+app.delete("/api/reports/all", async (req, res) => {
   try {
-    const wantFull = String(req.query.full || "").toLowerCase() === "1" || String(req.query.full || "").toLowerCase() === "true";
-    const projection = wantFull
-      ? "+answers +cumulative +eyeBank +visionCenter"
-      : "district institution month year updatedAt";
+    const r = await Report.deleteMany({});
+    res.json({ ok: true, deleted: r.deletedCount });
+  } catch (e) {
+    console.error("DELETE /api/reports/all error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
 
-    const reports = await Report.find({}).select(projection).lean();
+/* ===== District Institution-wise (Month + Cumulative 84-length arrays) ===== */
+app.get("/api/district-institution-report", async (req, res) => {
+  try {
+    let { district, month, year } = req.query;
+    district = String(district || "").trim();
+    month = normalizeMonth(month || "");
+    year = String(year || "").trim();
 
-    // sort same as list
-    reports.sort((a, b) => {
-      const ya = Number(a.year), yb = Number(b.year);
-      if (ya !== yb) return yb - ya;
-      const ma = ORDER[a.month] ?? 99, mb = ORDER[b.month] ?? 99;
-      if (ma !== mb) return ma - mb;
-      return (a.institution || "").localeCompare(b.institution || "");
+    if (!district || !month || !year) {
+      return res.status(400).json({ ok: false, error: "missing_fields" });
+    }
+
+    // Determine fiscal window Apr → selected month
+    const window = _fiscalWindow(month, year);
+    const monthsInWindow = new Set(window.map((w) => `${w.month}:${w.year}`));
+
+    // Fetch ALL docs for this district in the window
+    const years = [...new Set(window.map((w) => w.year))];
+    const docs = await Report.find({
+      ...ciEq("district", district),
+      year: { $in: years.map(String) },
+      month: { $in: window.map((w) => w.month) },
+    }).lean();
+
+    // Group by institution (exclude DOC logins)
+    const groups = new Map(); // inst -> { byMonth: Map("April:2025" -> doc) }
+    for (const raw of docs) {
+      const d = _ensure84OnDoc(raw);
+      if (/^dc\s|^doc\s/i.test(d.institution || "")) continue; // skip coordinators
+      const key = d.institution;
+      if (!groups.has(key)) groups.set(key, { byMonth: new Map() });
+      const g = groups.get(key);
+      const tag = `${d.month}:${d.year}`;
+      // Dedup: keep the one with latest updatedAt
+      if (!g.byMonth.has(tag)) {
+        g.byMonth.set(tag, d);
+      } else {
+        const prev = g.byMonth.get(tag);
+        const p = new Date(prev.updatedAt || prev.createdAt || 0).getTime();
+        const q = new Date(d.updatedAt || d.createdAt || 0).getTime();
+        if (q > p) g.byMonth.set(tag, d);
+      }
+    }
+
+    // Build response arrays
+    const institutionData = [];
+    let districtMonthTotal = _empty84();
+    let districtCumTotal = _empty84();
+
+    for (const [institution, g] of groups.entries()) {
+      // Month data = answers for selected month only (or zeros)
+      const selectedTag = `${month}:${year}`;
+      const monthDoc = g.byMonth.get(selectedTag);
+      const monthData = monthDoc ? _answersTo84Array(monthDoc.answers) : _empty84();
+
+      // Cumulative = sum over window (one per month)
+      let cumulativeData = _empty84();
+      for (const [tag, d] of g.byMonth.entries()) {
+        if (!monthsInWindow.has(tag)) continue;
+        cumulativeData = _sum84(cumulativeData, _answersTo84Array(d.answers));
+      }
+
+      districtMonthTotal = _sum84(districtMonthTotal, monthData);
+      districtCumTotal = _sum84(districtCumTotal, cumulativeData);
+
+      institutionData.push({ institution, monthData, cumulativeData });
+    }
+
+    // Sort institutions alphabetically (stable)
+    institutionData.sort((a, b) => a.institution.localeCompare(b.institution, "en"));
+
+    res.json({
+      ok: true,
+      district,
+      month,
+      year,
+      institutionData,
+      districtPerformance: { monthData: districtMonthTotal, cumulativeData: districtCumTotal },
     });
-
-    res.json({ ok: true, count: reports.length, reports });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    console.error("GET /api/district-institution-report error:", e);
+    res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-// ——— Admin: DELETE ALL REPORTS (use with caution) ———
-app.delete("/api/reports/all", async (_req, res) => {
-  try {
-    const result = await Report.deleteMany({});
-    res.json({ ok: true, deleted: result.deletedCount });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
+/* ======================= 404 ======================= */
+app.use((req, res) => res.status(404).json({ ok: false, error: "route_not_found", path: req.path }));
 
-// ——— Dev auth (no persistence) ———
-app.post("/api/login", (req, res) => {
-  const { username, password, district, institution } = req.body || {};
-  if (!username || !password || !district || !institution) {
-    return res.status(400).json({ error: "username, password, district, and institution are required" });
-  }
-  const isDoc = /^DC\s/i.test(institution || username);
-  return res.json({ ok: true, user: { username, district, institution, role: isDoc ? "DOC" : "USER", isDoc }, token: "dev-token" });
+/* ======================= Start ======================= */
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 API listening on port ${PORT}`);
 });
-
-// ——— JSON 404 catch-all (must be last route) ———
-app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "route_not_found", path: req.path });
-});
-
-// ——— start ———
-function logRoutes() {
-  const routes = (app._router?.stack || [])
-    .filter(l => l.route && l.route.path)
-    .map(l => ({ path: l.route.path, methods: Object.keys(l.route.methods || {}) }));
-  console.log("Registered routes:");
-  for (const r of routes) {
-    console.log(`${r.path} -> ${Object.keys(r.methods).join(",")}`);
-  }
-}
-app.listen(PORT, () => {
-  console.log(`🚀 API listening on http://localhost:${PORT}`);
-  logRoutes();
-});
+mongoose
+  .connect(MONGO_URI, { dbName: "optometry" })
+  .then(() => {
+    dbReady = true;
+    console.log("✅ Mongo connected");
+  })
+  .catch((e) => console.error("❌ Mongo connect failed:", e.message));
