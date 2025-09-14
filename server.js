@@ -88,6 +88,7 @@ const Report = mongoose.model("Report", ReportSchema);
 
 /* ======================= Express App ======================= */
 const app = express();
+app.use('/api/admin', require('./routes/admin'));
 
 // CORS (preflight handled)
 const corsOptions = {
