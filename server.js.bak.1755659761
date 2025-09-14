@@ -12,6 +12,7 @@ const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/optometry"
 
 // ——— app init ———
 const app = express();
+app.use("/api/admin", require("./routes/admin"));
 app.use(cors());
 app.use(express.json());
 
@@ -474,3 +475,6 @@ app.listen(PORT, () => {
   console.log(`🚀 API listening on http://localhost:${PORT}`);
   logRoutes();
 });
+
+// admin routes
+app.use('/api/admin', require('./routes/admin'));
