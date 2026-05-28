@@ -89,135 +89,6 @@ const _ensure84OnDoc = (doc) => {
   return d;
 };
 
-const getMonthNumber = (monthName) => {
-  const map = {
-    january: "01", february: "02", march: "03", april: "04", may: "05", june: "06",
-    july: "07", august: "08", september: "09", october: "10", november: "11", december: "12"
-  };
-  return map[String(monthName).trim().toLowerCase()] || "";
-};
-
-const injectRegisterCounts = async (doc) => {
-  if (!doc) return doc;
-  try {
-    const BlindRegisterModel = mongoose.model("BlindRegister");
-    const CataractBacklogModel = mongoose.model("CataractBacklog");
-    const OldAgedSpectaclesModel = mongoose.model("OldAgedSpectacles");
-    const SchoolSpectaclesModel = mongoose.model("SchoolSpectacles");
-
-    const monthNum = getMonthNumber(doc.month);
-    if (!monthNum) return doc;
-
-    const datePrefix = `${doc.year}-${monthNum}`;
-    const dateRegex = new RegExp("^" + datePrefix);
-
-    const queryBase = {
-      district: doc.district,
-      institution: doc.institution
-    };
-
-    // 1. Blind Register count (q55: blinds_detected)
-    const blindCount = await BlindRegisterModel.countDocuments({
-      ...queryBase,
-      date: { $regex: dateRegex }
-    });
-    doc.answers.q55 = blindCount;
-
-    // 2. Cataract Backlog counts
-    // q5: cataract_detected
-    const cataractDetectedCount = await CataractBacklogModel.countDocuments({
-      ...queryBase,
-      detectionDate: { $regex: dateRegex }
-    });
-    doc.answers.q5 = cataractDetectedCount;
-
-    // q7: cases_operated
-    const cataractOperatedCount = await CataractBacklogModel.countDocuments({
-      ...queryBase,
-      status: "Operated",
-      surgeryDate: { $regex: dateRegex }
-    });
-    doc.answers.q7 = cataractOperatedCount;
-
-    // q8: cases_operated_women_beneficiaries
-    const cataractWomenCount = await CataractBacklogModel.countDocuments({
-      ...queryBase,
-      status: "Operated",
-      sex: "Female",
-      surgeryDate: { $regex: dateRegex }
-    });
-    doc.answers.q8 = cataractWomenCount;
-
-    // 3. Old Aged Spectacles counts
-    // q11: specs_provided_old_aged
-    const oldAgedCount = await OldAgedSpectaclesModel.countDocuments({
-      ...queryBase,
-      dateOfPrescription: { $regex: dateRegex }
-    });
-    doc.answers.q11 = oldAgedCount;
-    doc.answers.q59 = oldAgedCount; // old_presc_sent_state
-
-    // q57: specs_old_male
-    const oldAgedMaleCount = await OldAgedSpectaclesModel.countDocuments({
-      ...queryBase,
-      sex: "Male",
-      dateOfPrescription: { $regex: dateRegex }
-    });
-    doc.answers.q57 = oldAgedMaleCount;
-
-    // q58: specs_old_female
-    const oldAgedFemaleCount = await OldAgedSpectaclesModel.countDocuments({
-      ...queryBase,
-      sex: "Female",
-      dateOfPrescription: { $regex: dateRegex }
-    });
-    doc.answers.q58 = oldAgedFemaleCount;
-
-    // 4. School Spectacles counts
-    // q26: school_spectacles_prescribed, q27: school_spectacles_free_supplied, q64: school_glasses_prescribed
-    const schoolSpecsCountVal = await SchoolSpectaclesModel.countDocuments({
-      ...queryBase,
-      dateOfPrescription: { $regex: dateRegex }
-    });
-    doc.answers.q26 = schoolSpecsCountVal;
-    doc.answers.q27 = schoolSpecsCountVal;
-    doc.answers.q64 = schoolSpecsCountVal;
-    doc.answers.q67 = schoolSpecsCountVal; // school_presc_sent_state
-
-    // q65: school_specs_male
-    const schoolSpecsMaleCount = await SchoolSpectaclesModel.countDocuments({
-      ...queryBase,
-      sex: "Male",
-      dateOfPrescription: { $regex: dateRegex }
-    });
-    doc.answers.q65 = schoolSpecsMaleCount;
-
-    // q66: school_specs_female
-    const schoolSpecsFemaleCount = await SchoolSpectaclesModel.countDocuments({
-      ...queryBase,
-      sex: "Female",
-      dateOfPrescription: { $regex: dateRegex }
-    });
-    doc.answers.q66 = schoolSpecsFemaleCount;
-
-  } catch (err) {
-    console.error("Error injecting register counts into report:", err);
-  }
-
-  return doc;
-};
-
-const ensureAndInjectReportData = async (rawDoc) => {
-  if (!rawDoc) return rawDoc;
-  const doc = _ensure84OnDoc(rawDoc);
-  const injected = await injectRegisterCounts(doc);
-  const hasCum = rawDoc.cumulative && Object.keys(rawDoc.cumulative).length > 0;
-  if (!hasCum) {
-    injected.cumulative = { ...injected.answers };
-  }
-  return injected;
-};
-
 const _fiscalStartYear = (m, y) =>
   ["January", "February", "March"].includes(m) ? +y - 1 : +y;
 
@@ -659,8 +530,7 @@ app.get("/api/reports", async (req, res) => {
       .limit(lim)
       .lean();
 
-    const injectedDocs = await Promise.all(docs.map(ensureAndInjectReportData));
-    res.json({ ok: true, docs: injectedDocs });
+    res.json({ ok: true, docs: docs.map(_ensure84OnDoc) });
   } catch (e) {
     console.error("❌ GET /api/reports error:", e);
     res.status(500).json({ ok: false, error: "server_error" });
@@ -671,8 +541,7 @@ app.get("/api/reports/:id", async (req, res) => {
   try {
     const doc = await Report.findById(req.params.id);
     if (!doc) return res.status(404).json({ ok: false, error: "not_found" });
-    const injectedDoc = await ensureAndInjectReportData(doc);
-    res.json({ ok: true, doc: injectedDoc });
+    res.json({ ok: true, doc: _ensure84OnDoc(doc) });
   } catch (e) {
     console.error("❌ GET /api/reports/:id error:", e);
     res.status(500).json({ ok: false, error: "server_error" });
