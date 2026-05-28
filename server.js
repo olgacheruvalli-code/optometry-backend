@@ -184,6 +184,8 @@ const BlindRegisterSchema = new mongoose.Schema(
     district: String,
     institution: String,
     optometrist: String,
+    optometristName: String,
+    optometristPhone: String,
     date: String,
   },
   { timestamps: true }
@@ -207,6 +209,8 @@ const CataractBacklogSchema = new mongoose.Schema(
     district: String,
     institution: String,
     optometrist: String,
+    optometristName: String,
+    optometristPhone: String,
   },
   { timestamps: true }
 );
@@ -248,6 +252,8 @@ const OldAgedSpectaclesSchema = new mongoose.Schema(
     district: String,
     institution: String,
     optometrist: String,
+    optometristName: String,
+    optometristPhone: String,
   },
   { timestamps: true }
 );
@@ -291,6 +297,8 @@ const SchoolSpectaclesSchema = new mongoose.Schema(
     district: String,
     institution: String,
     optometrist: String,
+    optometristName: String,
+    optometristPhone: String,
   },
   { timestamps: true }
 );
