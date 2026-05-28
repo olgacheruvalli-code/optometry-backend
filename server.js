@@ -170,6 +170,134 @@ const AmblyopiaSchema = new mongoose.Schema(
 const Amblyopia =
   mongoose.models.Amblyopia || mongoose.model("Amblyopia", AmblyopiaSchema);
 
+/* ======================= Registers Schemas ======================= */
+const BlindRegisterSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    age: String,
+    sex: String,
+    address: String,
+    vaRE: String,
+    vaLE: String,
+    cause: String,
+    treatment: String,
+    district: String,
+    institution: String,
+    optometrist: String,
+    date: String,
+  },
+  { timestamps: true }
+);
+const BlindRegister =
+  mongoose.models.BlindRegister || mongoose.model("BlindRegister", BlindRegisterSchema);
+
+const CataractBacklogSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    age: String,
+    sex: String,
+    address: String,
+    vaRE: String,
+    vaLE: String,
+    eyeOperated: String,
+    detectionDate: String,
+    referral: String,
+    status: { type: String, default: "Pending" },
+    surgeryDate: String,
+    district: String,
+    institution: String,
+    optometrist: String,
+  },
+  { timestamps: true }
+);
+const CataractBacklog =
+  mongoose.models.CataractBacklog || mongoose.model("CataractBacklog", CataractBacklogSchema);
+
+const OldAgedSpectaclesSchema = new mongoose.Schema(
+  {
+    slNo: String,
+    name: { type: String, required: true },
+    dateOfPrescription: String,
+    sex: String,
+    age: String,
+    diagnosis: String,
+    // Vision
+    visionRE_DV: String,
+    visionRE_NV: String,
+    visionLE_DV: String,
+    visionLE_NV: String,
+    // Prescribed Power RE
+    powerRE_Sph: String,
+    powerRE_Cyl: String,
+    powerRE_Axis: String,
+    powerRE_Add: String,
+    // Prescribed Power LE
+    powerLE_Sph: String,
+    powerLE_Cyl: String,
+    powerLE_Axis: String,
+    powerLE_Add: String,
+    // Corrected Vision
+    correctedRE_DV: String,
+    correctedRE_NV: String,
+    correctedLE_DV: String,
+    correctedLE_NV: String,
+    
+    ipdFrameSize: String,
+    reference: String,
+    address: String,
+    district: String,
+    institution: String,
+    optometrist: String,
+  },
+  { timestamps: true }
+);
+const OldAgedSpectacles =
+  mongoose.models.OldAgedSpectacles || mongoose.model("OldAgedSpectacles", OldAgedSpectaclesSchema);
+
+const SchoolSpectaclesSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    dateOfPrescription: String,
+    sex: String,
+    age: String,
+    schoolName: String,
+    classStandard: String,
+    teacherName: String,
+    diagnosis: String,
+    // Vision
+    visionRE_DV: String,
+    visionRE_NV: String,
+    visionLE_DV: String,
+    visionLE_NV: String,
+    // Prescribed Power RE
+    powerRE_Sph: String,
+    powerRE_Cyl: String,
+    powerRE_Axis: String,
+    powerRE_Add: String,
+    // Prescribed Power LE
+    powerLE_Sph: String,
+    powerLE_Cyl: String,
+    powerLE_Axis: String,
+    powerLE_Add: String,
+    // Corrected Vision
+    correctedRE_DV: String,
+    correctedRE_NV: String,
+    correctedLE_DV: String,
+    correctedLE_NV: String,
+    
+    ipdFrameSize: String,
+    reference: String,
+    address: String,
+    district: String,
+    institution: String,
+    optometrist: String,
+  },
+  { timestamps: true }
+);
+const SchoolSpectacles =
+  mongoose.models.SchoolSpectacles || mongoose.model("SchoolSpectacles", SchoolSpectaclesSchema);
+
+
 /* ======================= Express App ======================= */
 const app = express();
 let dbReady = false;
@@ -298,6 +426,64 @@ app.get("/api/amblyopia-research", async (req, res) => {
     res.json({ ok: false, error: "server_error" });
   }
 });
+
+/* ======================= Helper for Register Endpoints ======================= */
+function makeRegisterRoutes(routePath, Model) {
+  app.post(`/api/${routePath}`, async (req, res) => {
+    try {
+      const data = req.body;
+      if (!data.district || !data.institution) {
+        return res.status(400).json({ ok: false, error: "Missing district/institution" });
+      }
+      const doc = await Model.create(data);
+      res.json({ ok: true, doc });
+    } catch (e) {
+      console.error(`❌ ${routePath} save error:`, e);
+      res.status(500).json({ ok: false, error: "server_error" });
+    }
+  });
+
+  app.get(`/api/${routePath}`, async (req, res) => {
+    try {
+      const { district, institution } = req.query;
+      const filter = {};
+      if (district) filter.district = district;
+      if (institution) filter.institution = institution;
+      const docs = await Model.find(filter).sort({ createdAt: -1 }).lean();
+      res.json({ ok: true, docs });
+    } catch (e) {
+      console.error(`❌ ${routePath} fetch error:`, e);
+      res.status(500).json({ ok: false, error: "server_error" });
+    }
+  });
+
+  app.put(`/api/${routePath}/:id`, async (req, res) => {
+    try {
+      const doc = await Model.findByIdAndUpdate(req.params.id, req.body, { new: true });
+      if (!doc) return res.status(404).json({ ok: false, error: "not_found" });
+      res.json({ ok: true, doc });
+    } catch (e) {
+      console.error(`❌ ${routePath} update error:`, e);
+      res.status(500).json({ ok: false, error: "server_error" });
+    }
+  });
+
+  app.delete(`/api/${routePath}/:id`, async (req, res) => {
+    try {
+      const doc = await Model.findByIdAndDelete(req.params.id);
+      if (!doc) return res.status(404).json({ ok: false, error: "not_found" });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(`❌ ${routePath} delete error:`, e);
+      res.status(500).json({ ok: false, error: "server_error" });
+    }
+  });
+}
+
+makeRegisterRoutes("blind-register", BlindRegister);
+makeRegisterRoutes("cataract-backlog", CataractBacklog);
+makeRegisterRoutes("old-aged-spectacles", OldAgedSpectacles);
+makeRegisterRoutes("school-spectacles", SchoolSpectacles);
 
 /* ======================= REPORT ROUTES ======================= */
 app.get("/api/reports", async (req, res) => {
