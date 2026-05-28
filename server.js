@@ -269,6 +269,10 @@ const SchoolSpectaclesSchema = new mongoose.Schema(
     schoolName: String,
     classStandard: String,
     teacherName: String,
+    taluk: String,
+    remarks: String,
+    parentName: String,
+    parentPhone: String,
     diagnosis: String,
     // Vision
     visionRE_DV: String,
