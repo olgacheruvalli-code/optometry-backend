@@ -254,6 +254,7 @@ const OldAgedSpectaclesSchema = new mongoose.Schema(
     optometrist: String,
     optometristName: String,
     optometristPhone: String,
+    deliveryStatus: { type: String, default: "Pending" },
   },
   { timestamps: true }
 );
@@ -303,6 +304,7 @@ const SchoolSpectaclesSchema = new mongoose.Schema(
     optometrist: String,
     optometristName: String,
     optometristPhone: String,
+    deliveryStatus: { type: String, default: "Pending" },
   },
   { timestamps: true }
 );
