@@ -461,20 +461,12 @@ app.post("/api/login", async (req, res) => {
     const cleanDistrict = sanitize(district || "");
     const cleanInst = sanitize(institution || "");
 
-    // 1️⃣ DEVELOPER / SUPER ADMIN LOGIN
-    if (isAdminLogin || isDevAdmin(cleanEmail)) {
-      let isAuthorized = (cleanPass === ADMIN_PASS || cleanPass === "451970");
+    // 1️⃣ DEVELOPER / SUPER ADMIN LOGIN (Only if explicitly requested or logging in without district/institution)
+    const isExplicitAdmin =
+      isAdminLogin || (!cleanDistrict && !cleanInst && isDevAdmin(cleanEmail));
 
-      if (!isAuthorized && cleanEmail) {
-        const dbAdmin = await User.findOne({ email: cleanEmail });
-        if (
-          dbAdmin &&
-          (verifyPassword(cleanPass, dbAdmin.passwordHash) ||
-            cleanPass === dbAdmin.passwordHash)
-        ) {
-          isAuthorized = true;
-        }
-      }
+    if (isExplicitAdmin) {
+      const isAuthorized = cleanPass === ADMIN_PASS || cleanPass === "451970";
 
       if (isAuthorized) {
         return res.json({
