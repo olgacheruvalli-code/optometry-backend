@@ -1119,8 +1119,12 @@ app.get("/api/reports", async (req, res) => {
     } = req.query;
 
     const filter = {};
-    if (district) filter.district = sanitize(district);
-    if (institution) filter.institution = sanitize(institution);
+    if (district && String(district).trim().toLowerCase() !== "all" && String(district).trim().toLowerCase() !== "all districts") {
+      filter.district = sanitize(district);
+    }
+    if (institution && String(institution).trim().toLowerCase() !== "all" && String(institution).trim().toLowerCase() !== "all institutions") {
+      filter.institution = sanitize(institution);
+    }
     if (month) filter.month = normalizeMonth(month);
     if (year) filter.year = String(year);
 
