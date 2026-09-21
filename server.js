@@ -369,6 +369,7 @@ const isDevAdmin = (emailStr = "") => {
   const e = String(emailStr || "").toLowerCase().trim();
   return (
     e === ADMIN_EMAIL ||
+    e === "cpc.amma@gmail.com" ||
     e === "admin@optometry.com" ||
     e === "developer@optometry.com" ||
     e === "admin" ||
@@ -462,7 +463,20 @@ app.post("/api/login", async (req, res) => {
 
     // 1️⃣ DEVELOPER / SUPER ADMIN LOGIN
     if (isAdminLogin || isDevAdmin(cleanEmail)) {
-      if (cleanPass === ADMIN_PASS || cleanPass === "451970") {
+      let isAuthorized = (cleanPass === ADMIN_PASS || cleanPass === "451970");
+
+      if (!isAuthorized && cleanEmail) {
+        const dbAdmin = await User.findOne({ email: cleanEmail });
+        if (
+          dbAdmin &&
+          (verifyPassword(cleanPass, dbAdmin.passwordHash) ||
+            cleanPass === dbAdmin.passwordHash)
+        ) {
+          isAuthorized = true;
+        }
+      }
+
+      if (isAuthorized) {
         return res.json({
           ok: true,
           user: {
@@ -477,6 +491,11 @@ app.post("/api/login", async (req, res) => {
             isDoc: true,
             isGuest: false,
           },
+        });
+      } else {
+        return res.status(401).json({
+          ok: false,
+          error: "Incorrect Admin / Developer password.",
         });
       }
     }
