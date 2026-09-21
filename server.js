@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 /* ======================= Config ======================= */
 // ✅ Using 5050 port (fixed)
@@ -32,7 +33,7 @@ const FISCAL_MONTHS = [
   "February",
   "March",
 ];
-const ALL_QUESTION_KEYS = Array.from({ length: 84 }, (_, i) => `q${i + 1}`);
+const ALL_QUESTION_KEYS = Array.from({ length: 86 }, (_, i) => `q${i + 1}`);
 
 /* ======================= Name Normalization ======================= */
 const sanitize = (s = "") => String(s).replace(/\s+/g, " ").trim();
@@ -65,6 +66,12 @@ const _num = (v) => {
 const _normalize84 = (obj = {}) => {
   const out = {};
   for (const k of ALL_QUESTION_KEYS) out[k] = _num(obj[k]);
+  // Also preserve any named semantic keys in answers
+  for (const [k, v] of Object.entries(obj)) {
+    if (!k.startsWith("q") && v !== undefined && v !== null && v !== "") {
+      out[k] = _num(v);
+    }
+  }
   return out;
 };
 
@@ -311,6 +318,63 @@ const SchoolSpectaclesSchema = new mongoose.Schema(
 const SchoolSpectacles =
   mongoose.models.SchoolSpectacles || mongoose.model("SchoolSpectacles", SchoolSpectaclesSchema);
 
+/* ======================= User Schema (Optometrist, DOC, Admin) ======================= */
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.pbkdf2Sync(String(password), salt, 10000, 64, "sha512").toString("hex");
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  if (!password || !storedHash || !storedHash.includes(":")) return false;
+  const [salt, originalHash] = storedHash.split(":");
+  const hash = crypto.pbkdf2Sync(String(password), salt, 10000, 64, "sha512").toString("hex");
+  return hash === originalHash;
+}
+
+const UserSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    email: { type: String, required: true, lowercase: true, trim: true },
+    district: { type: String, required: true, trim: true },
+    institution: { type: String, required: true, trim: true },
+    phone: { type: String, required: true, trim: true },
+    passwordHash: { type: String, required: true },
+    securityPin: { type: String, trim: true, default: "" },
+    role: {
+      type: String,
+      enum: ["OPTOMETRIST", "DOC", "ADMIN"],
+      default: "OPTOMETRIST",
+    },
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected", "deactivated"],
+      default: "pending",
+    },
+    approvedAt: { type: Date },
+    approvedBy: { type: String },
+    deactivatedAt: { type: Date },
+  },
+  { timestamps: true }
+);
+UserSchema.index({ email: 1 });
+UserSchema.index({ district: 1, institution: 1, status: 1 });
+
+const User = mongoose.models.User || mongoose.model("User", UserSchema);
+
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "developer@optometry.kerala.gov.in").toLowerCase().trim();
+const ADMIN_PASS = process.env.ADMIN_PASSWORD || process.env.ADMIN_SECRET || "451970";
+
+const isDevAdmin = (emailStr = "") => {
+  const e = String(emailStr || "").toLowerCase().trim();
+  return (
+    e === ADMIN_EMAIL ||
+    e === "admin@optometry.com" ||
+    e === "developer@optometry.com" ||
+    e === "admin" ||
+    e === "developer"
+  );
+};
 
 /* ======================= Express App ======================= */
 const app = express();
@@ -360,8 +424,15 @@ app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
 
-  // allow ping/health/login before db is ready
-  const pass = ["/api/health", "/api/ping", "/api/login"];
+  // allow ping/health/auth before db is ready
+  const pass = [
+    "/api/health",
+    "/api/ping",
+    "/api/login",
+    "/api/register",
+    "/api/forgot-password/verify",
+    "/api/forgot-password/reset",
+  ];
 
   if (!dbReady && req.path.startsWith("/api") && !pass.includes(req.path)) {
     return res.status(503).json({ ok: false, error: "db_not_ready" });
@@ -378,30 +449,524 @@ app.get("/api/ping", (req, res) =>
   res.json({ ok: true, msg: "backend alive", db: dbReady })
 );
 
-/* ======================= SIMPLE LOCAL LOGIN ======================= */
-app.post("/api/login", (req, res) => {
-  const { username, district, institution } = req.body || {};
+/* ======================= AUTHENTICATION & LOGIN ======================= */
+app.post("/api/login", async (req, res) => {
+  try {
+    const { district, institution, email, password, username, isAdminLogin } =
+      req.body || {};
 
-  if (!username) {
-    return res.status(400).json({ ok: false, error: "missing_username" });
+    const cleanEmail = String(email || username || "").trim().toLowerCase();
+    const cleanPass = String(password || "").trim();
+    const cleanDistrict = sanitize(district || "");
+    const cleanInst = sanitize(institution || "");
+
+    // 1️⃣ DEVELOPER / SUPER ADMIN LOGIN
+    if (isAdminLogin || isDevAdmin(cleanEmail)) {
+      if (cleanPass === ADMIN_PASS || cleanPass === "451970") {
+        return res.json({
+          ok: true,
+          user: {
+            username: "Developer Admin",
+            name: "Developer Admin",
+            email: cleanEmail || ADMIN_EMAIL,
+            district: "All",
+            institution: "All Institutions",
+            role: "ADMIN",
+            isAdmin: true,
+            isSuperAdmin: true,
+            isDoc: true,
+            isGuest: false,
+          },
+        });
+      }
+    }
+
+    // 2️⃣ REGULAR OPTOMETRIST / DOC LOGIN
+    if (!cleanEmail || !cleanPass) {
+      return res.status(400).json({
+        ok: false,
+        error: "Please enter your Email ID and Password.",
+      });
+    }
+
+    if (!cleanDistrict || !cleanInst) {
+      return res.status(400).json({
+        ok: false,
+        error: "Please select District and Institution.",
+      });
+    }
+
+    // Lookup user in DB by email
+    const user = await User.findOne({ email: cleanEmail });
+
+    if (!user) {
+      // Legacy fallback for DOC user with common password 123 if not yet registered in DB
+      const isDocInst =
+        cleanInst.toUpperCase().startsWith("DOC ") || cleanEmail.startsWith("doc");
+      if (isDocInst && cleanPass === "123") {
+        return res.json({
+          ok: true,
+          user: {
+            username: cleanInst,
+            name: cleanInst,
+            email: cleanEmail,
+            district: cleanDistrict,
+            institution: cleanInst,
+            role: "DOC",
+            isDoc: true,
+            isGuest: false,
+          },
+        });
+      }
+
+      return res.status(401).json({
+        ok: false,
+        error:
+          "No account found with this email address. Please check your email or register as a new optometrist.",
+      });
+    }
+
+    // Verify Password
+    const isPasswordCorrect =
+      verifyPassword(cleanPass, user.passwordHash) ||
+      cleanPass === user.passwordHash;
+    if (!isPasswordCorrect) {
+      return res.status(401).json({
+        ok: false,
+        error: "Incorrect password.",
+      });
+    }
+
+    // Check Approval Status
+    if (user.status === "pending") {
+      return res.status(403).json({
+        ok: false,
+        error:
+          "Your registration is pending approval by the Admin / Developer. Please wait for approval before logging in.",
+      });
+    }
+
+    if (user.status === "rejected") {
+      return res.status(403).json({
+        ok: false,
+        error:
+          "Your account registration was rejected. Please contact the Admin / Developer.",
+      });
+    }
+
+    if (user.status === "deactivated") {
+      return res.status(403).json({
+        ok: false,
+        error:
+          "This account is no longer active for this institution. A new optometrist has been approved for this institution.",
+      });
+    }
+
+    if (user.status !== "approved") {
+      return res.status(403).json({
+        ok: false,
+        error: `Account is inactive (${user.status}). Please contact the Admin.`,
+      });
+    }
+
+    // Check district and institution matching
+    const instMatched =
+      normInstKey(user.institution) === normInstKey(cleanInst) ||
+      user.institution.toLowerCase() === cleanInst.toLowerCase();
+    const distMatched =
+      user.district.toLowerCase() === cleanDistrict.toLowerCase();
+
+    if (!distMatched || !instMatched) {
+      return res.status(400).json({
+        ok: false,
+        error: `This account is registered for "${user.institution}" in district "${user.district}". Please select your registered district and institution.`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      user: {
+        id: user._id,
+        username: user.name || user.email,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        district: user.district,
+        institution: user.institution,
+        role: user.role,
+        isDoc: user.role === "DOC",
+        isGuest: false,
+      },
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Server error during login." });
   }
+});
 
-  const role =
-    String(username).toLowerCase().startsWith("dc") ||
-    String(username).toLowerCase().startsWith("doc")
-      ? "DOC"
-      : "OPTOMETRIST";
+/* ======================= REGISTRATION ======================= */
+app.post("/api/register", async (req, res) => {
+  try {
+    const { name, email, phone, district, institution, password, securityPin } =
+      req.body || {};
 
-  return res.json({
-    ok: true,
-    user: {
-      username,
-      district: district || "",
-      institution: institution || "",
+    if (!name || !email || !district || !institution || !password) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Please fill in all required fields (Name, Email, District, Institution, Password).",
+      });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPhone = String(phone || "").trim();
+    const cleanDistrict = sanitize(district);
+    const cleanInst = sanitize(institution);
+    const cleanName = sanitize(name);
+    const cleanPin = String(securityPin || "").trim();
+
+    // Determine role: DOC if institution starts with DOC or email starts with doc
+    const isDoc =
+      cleanInst.toUpperCase().startsWith("DOC ") ||
+      cleanEmail.startsWith("doc");
+    const role = isDoc ? "DOC" : "OPTOMETRIST";
+
+    // Check if email already registered
+    const existing = await User.findOne({ email: cleanEmail });
+    if (existing) {
+      if (existing.status === "approved") {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "An active account with this email address already exists. Please log in or use Forgot Password.",
+        });
+      }
+      if (existing.status === "pending") {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "A registration with this email is already pending approval by the Admin / Developer.",
+        });
+      }
+
+      // If deactivated or rejected, update and re-submit as pending
+      existing.name = cleanName;
+      existing.district = cleanDistrict;
+      existing.institution = cleanInst;
+      existing.phone = cleanPhone;
+      existing.passwordHash = hashPassword(password);
+      existing.securityPin = cleanPin;
+      existing.role = role;
+      existing.status = "pending";
+      await existing.save();
+
+      return res.json({
+        ok: true,
+        message:
+          "Your registration has been re-submitted for Admin / Developer approval.",
+      });
+    }
+
+    // Create new user in pending status
+    const newUser = new User({
+      name: cleanName,
+      email: cleanEmail,
+      phone: cleanPhone,
+      district: cleanDistrict,
+      institution: cleanInst,
+      passwordHash: hashPassword(password),
+      securityPin: cleanPin,
       role,
-      isGuest: false,
-    },
-  });
+      status: "pending",
+    });
+
+    await newUser.save();
+
+    return res.json({
+      ok: true,
+      message:
+        "Registration submitted successfully! Please wait for Admin / Developer approval before logging in.",
+    });
+  } catch (err) {
+    console.error("Registration error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Server error during registration." });
+  }
+});
+
+/* ======================= ADMIN / DEVELOPER APPROVALS & USER MANAGEMENT ======================= */
+// Get all users with filters
+app.get("/api/admin/users", async (req, res) => {
+  try {
+    const { district, status, role, institution } = req.query || {};
+    const filter = {};
+    if (district && district !== "All") filter.district = district;
+    if (status && status !== "All") filter.status = status;
+    if (role && role !== "All") filter.role = role;
+    if (institution && institution !== "All") filter.institution = institution;
+
+    const users = await User.find(filter)
+      .select("-passwordHash")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({ ok: true, users });
+  } catch (err) {
+    console.error("Admin get users error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch users." });
+  }
+});
+
+// Approve user with SINGLE ACTIVE OPTOMETRIST PER INSTITUTION rule
+app.post("/api/admin/approve-user", async (req, res) => {
+  try {
+    const { userId, approvedBy } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing userId." });
+    }
+
+    const targetUser = await User.findById(userId);
+    if (!targetUser) {
+      return res.status(404).json({ ok: false, error: "User not found." });
+    }
+
+    const now = new Date();
+    const adminIdentifier = approvedBy || "Developer Admin";
+    let deactivatedCount = 0;
+
+    // Rule: When a new opto is approved for an institution, old optos for this institution are deactivated
+    if (targetUser.role === "OPTOMETRIST") {
+      const targetCanonInst = normInstKey(targetUser.institution);
+      const activeSameInst = await User.find({
+        district: targetUser.district,
+        status: "approved",
+        _id: { $ne: targetUser._id },
+      });
+
+      for (const other of activeSameInst) {
+        if (normInstKey(other.institution) === targetCanonInst) {
+          other.status = "deactivated";
+          other.deactivatedAt = now;
+          await other.save();
+          deactivatedCount++;
+        }
+      }
+    } else if (targetUser.role === "DOC") {
+      // Deactivate any other approved DOC for this district
+      const otherDocs = await User.find({
+        district: targetUser.district,
+        role: "DOC",
+        status: "approved",
+        _id: { $ne: targetUser._id },
+      });
+      for (const otherDoc of otherDocs) {
+        otherDoc.status = "deactivated";
+        otherDoc.deactivatedAt = now;
+        await otherDoc.save();
+        deactivatedCount++;
+      }
+    }
+
+    // Approve the new user
+    targetUser.status = "approved";
+    targetUser.approvedAt = now;
+    targetUser.approvedBy = adminIdentifier;
+    await targetUser.save();
+
+    return res.json({
+      ok: true,
+      message: `Approved ${targetUser.name} (${targetUser.email}) for ${
+        targetUser.institution
+      }.${
+        deactivatedCount > 0
+          ? ` ${deactivatedCount} previous user(s) for this institution have been deactivated.`
+          : ""
+      }`,
+      user: targetUser,
+      deactivatedCount,
+    });
+  } catch (err) {
+    console.error("Admin approve user error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to approve user." });
+  }
+});
+
+// Reject user
+app.post("/api/admin/reject-user", async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing userId." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found." });
+    }
+
+    user.status = "rejected";
+    await user.save();
+
+    return res.json({
+      ok: true,
+      message: `Registration for ${user.name} was rejected.`,
+    });
+  } catch (err) {
+    console.error("Admin reject user error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to reject user." });
+  }
+});
+
+// Deactivate user manually
+app.post("/api/admin/deactivate-user", async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing userId." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found." });
+    }
+
+    user.status = "deactivated";
+    user.deactivatedAt = new Date();
+    await user.save();
+
+    return res.json({
+      ok: true,
+      message: `Account for ${user.name} has been deactivated.`,
+    });
+  } catch (err) {
+    console.error("Admin deactivate user error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Failed to deactivate user." });
+  }
+});
+
+// Admin Reset Password
+app.post("/api/admin/reset-password", async (req, res) => {
+  try {
+    const { userId, newPassword } = req.body || {};
+    if (!userId || !newPassword) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing userId or newPassword." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found." });
+    }
+
+    user.passwordHash = hashPassword(newPassword);
+    await user.save();
+
+    return res.json({
+      ok: true,
+      message: `Password for ${user.name} was reset successfully.`,
+    });
+  } catch (err) {
+    console.error("Admin reset password error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Failed to reset password." });
+  }
+});
+
+/* ======================= FORGOT PASSWORD ======================= */
+// Verify identity
+app.post("/api/forgot-password/verify", async (req, res) => {
+  try {
+    const { email, phone, securityPin } = req.body || {};
+    if (!email) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Please enter your registered Email ID." });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        error:
+          "No account found with this email address. Please check spelling or contact the Admin / Developer.",
+      });
+    }
+
+    const cleanPhone = String(phone || "").trim();
+    const cleanPin = String(securityPin || "").trim();
+
+    const phoneMatches =
+      cleanPhone && user.phone && user.phone.trim() === cleanPhone;
+    const pinMatches =
+      cleanPin &&
+      user.securityPin &&
+      user.securityPin.trim() === cleanPin;
+
+    if (!phoneMatches && !pinMatches) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Verification failed: Mobile number or Security PIN does not match our records.",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      userId: user._id,
+      name: user.name,
+      message: "Identity verified. Please enter your new password.",
+    });
+  } catch (err) {
+    console.error("Forgot password verify error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Server error during verification." });
+  }
+});
+
+// Set new password
+app.post("/api/forgot-password/reset", async (req, res) => {
+  try {
+    const { userId, newPassword } = req.body || {};
+    if (!userId || !newPassword) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing userId or new password." });
+    }
+
+    if (String(newPassword).length < 3) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Password must be at least 3 characters." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: "User not found." });
+    }
+
+    user.passwordHash = hashPassword(newPassword);
+    await user.save();
+
+    return res.json({
+      ok: true,
+      message: "Password has been successfully updated! You can now log in.",
+    });
+  } catch (err) {
+    console.error("Forgot password reset error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Server error during password reset." });
+  }
 });
 
 /* ======================= Amblyopia Research ======================= */
