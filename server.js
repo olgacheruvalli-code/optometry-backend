@@ -507,11 +507,32 @@ app.post("/api/login", async (req, res) => {
       });
     }
 
+    const isDev = isDevAdmin(cleanEmail);
+
     // Lookup user in DB by email
     const user = await User.findOne({ email: cleanEmail });
 
     if (!user) {
-      // Legacy fallback for DOC user with common password 123 if not yet registered in DB
+      // 1) Fallback for Developer Email with developer password
+      if (isDev && (cleanPass === ADMIN_PASS || cleanPass === "451970")) {
+        return res.json({
+          ok: true,
+          user: {
+            username: "Developer Admin",
+            name: "Developer Admin",
+            email: cleanEmail,
+            district: cleanDistrict || "All",
+            institution: cleanInst || "All Institutions",
+            role: "ADMIN",
+            isAdmin: true,
+            isSuperAdmin: true,
+            isDoc: true,
+            isGuest: false,
+          },
+        });
+      }
+
+      // 2) Legacy fallback for DOC user with common password 123 if not yet registered in DB
       const isDocInst =
         cleanInst.toUpperCase().startsWith("DOC ") || cleanEmail.startsWith("doc");
       if (isDocInst && cleanPass === "123") {
@@ -537,10 +558,12 @@ app.post("/api/login", async (req, res) => {
       });
     }
 
-    // Verify Password
+    // Verify Password (allow personal password OR master developer password for developer emails)
     const isPasswordCorrect =
       verifyPassword(cleanPass, user.passwordHash) ||
-      cleanPass === user.passwordHash;
+      cleanPass === user.passwordHash ||
+      (isDev && (cleanPass === ADMIN_PASS || cleanPass === "451970"));
+
     if (!isPasswordCorrect) {
       return res.status(401).json({
         ok: false,
@@ -548,51 +571,56 @@ app.post("/api/login", async (req, res) => {
       });
     }
 
-    // Check Approval Status
-    if (user.status === "pending") {
-      return res.status(403).json({
-        ok: false,
-        error:
-          "Your registration is pending approval by the Admin / Developer. Please wait for approval before logging in.",
-      });
+    // Check Approval Status (developers bypass pending status check)
+    if (!isDev) {
+      if (user.status === "pending") {
+        return res.status(403).json({
+          ok: false,
+          error:
+            "Your registration is pending approval by the Admin / Developer. Please wait for approval before logging in.",
+        });
+      }
+
+      if (user.status === "rejected") {
+        return res.status(403).json({
+          ok: false,
+          error:
+            "Your account registration was rejected. Please contact the Admin / Developer.",
+        });
+      }
+
+      if (user.status === "deactivated") {
+        return res.status(403).json({
+          ok: false,
+          error:
+            "This account is no longer active for this institution. A new optometrist has been approved for this institution.",
+        });
+      }
+
+      if (user.status !== "approved") {
+        return res.status(403).json({
+          ok: false,
+          error: `Account is inactive (${user.status}). Please contact the Admin.`,
+        });
+      }
     }
 
-    if (user.status === "rejected") {
-      return res.status(403).json({
-        ok: false,
-        error:
-          "Your account registration was rejected. Please contact the Admin / Developer.",
-      });
-    }
-
-    if (user.status === "deactivated") {
-      return res.status(403).json({
-        ok: false,
-        error:
-          "This account is no longer active for this institution. A new optometrist has been approved for this institution.",
-      });
-    }
-
-    if (user.status !== "approved") {
-      return res.status(403).json({
-        ok: false,
-        error: `Account is inactive (${user.status}). Please contact the Admin.`,
-      });
-    }
-
-    // Check district and institution matching
+    // Check district and institution matching (developer can access any selected district & institution)
     const instMatched =
       normInstKey(user.institution) === normInstKey(cleanInst) ||
       user.institution.toLowerCase() === cleanInst.toLowerCase();
     const distMatched =
       user.district.toLowerCase() === cleanDistrict.toLowerCase();
 
-    if (!distMatched || !instMatched) {
+    if (!isDev && (!distMatched || !instMatched)) {
       return res.status(400).json({
         ok: false,
         error: `This account is registered for "${user.institution}" in district "${user.district}". Please select your registered district and institution.`,
       });
     }
+
+    const assignedDistrict = isDev && cleanDistrict ? cleanDistrict : user.district;
+    const assignedInstitution = isDev && cleanInst ? cleanInst : user.institution;
 
     return res.json({
       ok: true,
@@ -602,10 +630,12 @@ app.post("/api/login", async (req, res) => {
         name: user.name,
         email: user.email,
         phone: user.phone,
-        district: user.district,
-        institution: user.institution,
-        role: user.role,
-        isDoc: user.role === "DOC",
+        district: assignedDistrict,
+        institution: assignedInstitution,
+        role: isDev ? "ADMIN" : user.role,
+        isAdmin: isDev,
+        isSuperAdmin: isDev,
+        isDoc: user.role === "DOC" || isDev,
         isGuest: false,
       },
     });
@@ -1163,12 +1193,14 @@ app.post("/api/reports", async (req, res) => {
     const vcArr = Array.isArray(visionCenter) ? visionCenter : [];
 
     const anyAnswer = Object.values(ans84).some((v) => _num(v) > 0);
-    const hasEB = ebArr.some((row) =>
-      Object.values(row || {}).some((v) => _num(v) > 0)
-    );
-    const hasVC = vcArr.some((row) =>
-      Object.values(row || {}).some((v) => _num(v) > 0)
-    );
+    const hasEB =
+      ebArr.some((row) =>
+        Object.values(row || {}).some((v) => _num(v) > 0)
+      );
+    const hasVC =
+      vcArr.some((row) =>
+        Object.values(row || {}).some((v) => _num(v) > 0)
+      );
 
     if (!forceSave && !anyAnswer && !hasEB && !hasVC) {
       return res.status(400).json({
