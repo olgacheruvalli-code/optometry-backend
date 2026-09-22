@@ -1295,7 +1295,20 @@ app.post("/api/admin/purge-nov-2025", async (req, res) => {
   }
 });
 
-/* ======================= 404 ======================= */
+/* ======================= Client SPA & 404 ======================= */
+const path = require("path");
+const fs = require("fs");
+const clientDist = path.join(__dirname, "public_client");
+
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api")) return next();
+    res.sendFile(path.join(clientDist, "index.html"));
+  });
+}
+
+/* ======================= 404 for API ======================= */
 app.use((req, res) =>
   res
     .status(404)
