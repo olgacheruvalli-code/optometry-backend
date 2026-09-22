@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Optometry Electron</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+      }
+    </style>
+    <script>
+      // Define `global` for compatibility with some Node-style libraries
+      if (typeof global === 'undefined') {
+        window.global = window;
+      }
+    </script>
+<script>window.__API_BASE__="https://optometry-backend-iiuk.onrender.com";</script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

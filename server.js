@@ -386,34 +386,28 @@ const startedAt = new Date().toISOString();
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   if (ALLOWED_ORIGINS.includes(origin)) return true;
-  if (ALLOW_VERCEL_PREVIEWS) {
-    try {
-      const u = new URL(origin);
-      if (u.protocol === "https:" && u.hostname.endsWith(".vercel.app"))
-        return true;
-    } catch {}
-  }
-  return false;
+  try {
+    const u = new URL(origin);
+    if (u.hostname.endsWith(".vercel.app")) return true;
+    if (u.hostname.endsWith(".onrender.com")) return true;
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return true;
+  } catch {}
+  return true; // Allow client origins (stateless API, no session cookies)
 }
 
-let corsOptions;
-if (process.env.NODE_ENV !== "production") {
-  console.log("🔓 Local dev mode: allowing all origins");
-  corsOptions = { origin: true };
-} else {
-  corsOptions = {
-    origin(origin, cb) {
-      if (isAllowedOrigin(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`), false);
-    },
-    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
-    maxAge: 86400,
-  };
-}
+const corsOptions = {
+  origin(origin, cb) {
+    // Return boolean, NEVER pass new Error to cb which crashes Express into HTML 500
+    cb(null, isAllowedOrigin(origin));
+  },
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+  credentials: false,
+  maxAge: 86400,
+};
+
 app.use(cors(corsOptions));
-app.options(/^\/api\/.*$/, cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use((req, res, next) => {
   res.header("Vary", "Origin");
   next();
@@ -1314,6 +1308,16 @@ app.use((req, res) =>
     .status(404)
     .json({ ok: false, error: "route_not_found", path: req.path })
 );
+
+/* ======================= Global Error Handler ======================= */
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({
+    ok: false,
+    error: err.message || "Internal server error.",
+  });
+});
 
 /* ======================= Start ======================= */
 app.listen(PORT, "0.0.0.0", () =>

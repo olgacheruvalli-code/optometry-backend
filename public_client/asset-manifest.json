@@ -1,0 +1,15 @@
+{
+  "files": {
+    "main.css": "./static/css/main.3ca86452.css",
+    "main.js": "./static/js/main.159b3db2.js",
+    "static/media/crystal_transparent.png": "./static/media/crystal_transparent.047ebd03699acf0693d5.png",
+    "static/media/pradeep_profile.jpg": "./static/media/pradeep_profile.f59c87d4c84ca094f37a.jpg",
+    "index.html": "./index.html",
+    "main.3ca86452.css.map": "./static/css/main.3ca86452.css.map",
+    "main.159b3db2.js.map": "./static/js/main.159b3db2.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.3ca86452.css",
+    "static/js/main.159b3db2.js"
+  ]
+}
